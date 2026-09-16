@@ -1,0 +1,44 @@
+name: 'Configure CMake'
+description: 'Configures CMake build system'
+
+inputs:
+  config:
+    description: 'Build configuration (Debug/Release, any case)'
+    required: true
+
+outputs:
+  build-dir:
+    description: 'Directory containing the configured build for this preset'
+    value: ${{ steps.resolve.outputs.build-dir }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Normalize config
+      shell: bash
+      run: |
+        echo "CONFIG_LOWER=$(echo '${{ inputs.config }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+    - name: Configure CMake (Windows)
+      if: runner.os == 'Windows'
+      shell: cmd
+      run: |
+        for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
+        call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
+        cmake --preset x64-%CONFIG_LOWER%
+
+    - name: Configure CMake (Linux)
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        cmake --preset linux-$CONFIG_LOWER
+
+    - name: Resolve build directory
+      id: resolve
+      shell: bash
+      run: |
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          echo "build-dir=build/x64-$CONFIG_LOWER" >> "$GITHUB_OUTPUT"
+        else
+          echo "build-dir=build/linux-$CONFIG_LOWER" >> "$GITHUB_OUTPUT"
+        fi
