@@ -97,20 +97,6 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
-# ---- compile_commands.json for clangd ----
-# clangd only reads from a single CompilationDatabase directory (see .clangd:
-# CompilationDatabase: build), so whichever preset was just built also needs
-# mirroring to that fixed root-level location. Not tied to ${PROJECT_NAME}'s
-# POST_BUILD, and no dependency declared, since this has nothing to do with
-# whether the actual project target rebuilds - it just needs to run on every
-# invocation of the build tool.
-add_custom_target(process_compile_commands ALL
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_BINARY_DIR}/compile_commands.json"
-        "${CMAKE_SOURCE_DIR}/build/compile_commands.json"
-    COMMENT "Syncing compile_commands.json for clangd"
-)
-
 # ---- Configuration summary ----
 message(STATUS "")
 message(STATUS "${PROJECT_NAME} Configuration:")
