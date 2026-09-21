@@ -9,7 +9,7 @@ inputs:
 outputs:
   build-dir:
     description: 'Directory containing the configured build'
-    value: ${{ steps.resolve.outputs.build-dir }}
+    value: ${{ steps.configure.outputs.build-dir }}
 
   db-dir:
     description: 'Directory containing the post-processed compile_commands.json'
@@ -18,40 +18,43 @@ outputs:
 runs:
   using: 'composite'
   steps:
-    - name: Normalize config
-      shell: bash
+    - name: Configure CMake
+      id: configure
+      shell: pwsh
+      env:
+        CONFIG: ${{ inputs.config }}
       run: |
-        echo "CONFIG_LOWER=$(echo '${{ inputs.config }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+        $ErrorActionPreference = 'Stop'
 
-    - name: Configure CMake (Windows)
-      if: runner.os == 'Windows'
-      shell: cmd
-      run: |
-        for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set "VSINSTALL=%%i"
-        call "%VSINSTALL%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
-        cmake --preset x64-%CONFIG_LOWER%
+        $prefix = if ($env:RUNNER_OS -eq 'Windows') { 'x64' } else { 'linux' }
+        $preset = "$prefix-$($env:CONFIG.ToLowerInvariant())"
 
-    - name: Configure CMake (Linux)
-      if: runner.os == 'Linux'
-      shell: bash
-      run: |
-        cmake --preset linux-$CONFIG_LOWER
+        & cmake --preset $preset | Tee-Object -Variable log
+        if ($LASTEXITCODE -ne 0) {
+          throw "cmake --preset $preset failed with exit code $LASTEXITCODE."
+        }
 
-    - name: Resolve build directory
-      id: resolve
-      shell: bash
-      run: |
-        if [ "$RUNNER_OS" = "Windows" ]; then
-          echo "build-dir=build/x64-$CONFIG_LOWER" >> "$GITHUB_OUTPUT"
-        else
-          echo "build-dir=build/linux-$CONFIG_LOWER" >> "$GITHUB_OUTPUT"
-        fi
+        # Read the binary directory from CMake's own report rather than
+        # re-deriving it, so a preset's binaryDir can change without this
+        # action silently pointing at the wrong place.
+        $match = $log |
+          Select-String -Pattern '^-- Build files have been written to: (.+)$' |
+          Select-Object -Last 1
+        if (-not $match) {
+          throw 'Could not find the binary directory in the CMake output.'
+        }
+        $binaryDir = $match.Matches[0].Groups[1].Value.Trim()
+
+        # Workspace-relative, because hashFiles() in the workflow only matches
+        # paths inside the workspace.
+        $relative = [IO.Path]::GetRelativePath($env:GITHUB_WORKSPACE, $binaryDir) -replace '\\', '/'
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "build-dir=$relative"
 
     - name: Post-process compile database (optional)
       id: post-process
       shell: python
       env:
-        SCC_BUILD_DIR: ${{ steps.resolve.outputs.build-dir }}
+        SCC_BUILD_DIR: ${{ steps.configure.outputs.build-dir }}
       run: |
         import json
         import os

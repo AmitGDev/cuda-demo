@@ -29,6 +29,8 @@ Analyze Each Matrix Entry
      |
      +-- Checkout
      +-- Setup environment
+     |     +-- Python
+     |     +-- Ruff
      |     +-- MSVC / Clang
      |     +-- LLVM tools
      |     +-- Ninja
@@ -84,14 +86,15 @@ A repository may additionally provide:
 ```text
 .github-ext/
 ├── static-code-analysis.json
-└── setup_environment.py
+├── setup_environment.py
+└── post_process_compile_commands.py
 ```
 
 The `.github-ext/` directory is intentionally outside `.github/`.
 
 The generic `.github/` infrastructure is reusable across repositories and should not contain repository-specific dependencies, tool installation logic, or per-project analysis parameters.
 
-The optional extension provides a controlled place for two kinds of repository-specific customization:
+The optional extension provides a controlled place for three kinds of repository-specific customization:
 
 - **`static-code-analysis.json`** - a per-project override of the analysis matrix and optional features. When present, this file is used instead of `.github/static-code-analysis.json` (see [Configuration Override](#configuration-override) below).
 - **`setup_environment.py`** - repository-specific environment setup, such as:
@@ -103,8 +106,9 @@ The optional extension provides a controlled place for two kinds of repository-s
   - project-specific environment variables
   - PATH modifications
   - other repository-specific preparation
+- **`post_process_compile_commands.py`** - repository-specific translation of the compilation database before clang-tidy consumes it (see [Project-Specific Extensions](#project-specific-extensions)).
 
-Both files are optional and independent of each other. If neither exists, the generic CI behaves entirely from `.github/`.
+All files are optional and independent of each other. If none exists, the generic CI behaves entirely from `.github/`.
 
 The extension's contents are intentionally **free-form**. There is no artificial distinction between "dependencies" and "environment" because repository-specific setup may legitimately involve both.
 
@@ -500,20 +504,20 @@ The action uses the tools installed by `setup-environment`, so it must run after
 
 Formatting violations in either language fail the analysis job.
 
-### 4. Configure CMake
+### 4. Configure CMake and Prepare the Compilation Database
 
 The `configure-cmake` action normalizes the matrix `config` value to lowercase and configures the project using the matching preset from `CMakePresets.json`:
 
 ```text
-windows-<config>
+x64-<config>
 linux-<config>
 ```
 
 For example:
 
 ```text
-windows-debug
-windows-release
+x64-debug
+x64-release
 linux-debug
 linux-release
 ```
@@ -522,10 +526,36 @@ The action does not reconstruct compiler flags, build types, or generator settin
 
 Those settings belong to `CMakePresets.json`.
 
-The action exposes the resolved binary directory as:
+The action must run after `setup-environment`, which provides the compiler and tool environment.
+
+The binary directory is not derived from the preset name. The action reads it from CMake's own configure output (`Build files have been written to: ...`) and exposes it relative to the workspace, so a preset's `binaryDir` can change without the action pointing at the wrong place. The action fails if CMake does not report a binary directory.
+
+After configuration, the same action takes the generated compilation database and produces the one used by clang-tidy. It:
+
+- locates and validates `<build-dir>/compile_commands.json`
+- reports the number of compilation entries
+- checks whether a repository-specific post-processing script exists
+- invokes the script when present
+- otherwise copies the compilation database unchanged
+- validates the resulting database
+- verifies that the compilation-entry count has not changed
+
+The generic infrastructure has no compiler-specific knowledge.
+
+Most repositories require no post-processing at all.
+
+A repository whose actual compiler generates compilation commands that are not directly usable by clang-tidy may provide a repository-specific post-processing script.
+
+For example, a CUDA project may need to translate or remove NVCC-specific arguments before clang-tidy's Clang frontend consumes the database.
+
+The original compilation database is never modified. The processed copy is written to `<build-dir>/post-processed/`.
+
+The action exposes two outputs:
 
 ```text
-build-dir
+build-dir   the configured binary directory, as reported by CMake, relative to the workspace
+            (contains the original compile_commands.json)
+db-dir      the directory containing the post-processed compile_commands.json
 ```
 
 Example:
@@ -538,32 +568,7 @@ Example:
     config: ${{ matrix.config }}
 ```
 
-### 5. Post-process Compile Commands
-
-The optional compile-command processing step takes the configured build directory and produces the compilation database used by clang-tidy.
-
-It:
-
-- locates and validates `<build-dir>/compile_commands.json`
-- reports the number of compilation entries
-- checks whether a repository-specific post-processing script exists
-- invokes the script when present
-- otherwise copies the compilation database unchanged
-- validates the resulting database
-- verifies that the compilation-entry count has not changed
-- exposes the resulting directory as `db-dir`
-
-The generic infrastructure has no compiler-specific knowledge.
-
-Most repositories require no post-processing at all.
-
-A repository whose actual compiler generates compilation commands that are not directly usable by clang-tidy may provide a repository-specific post-processing script.
-
-For example, a CUDA project may need to translate or remove NVCC-specific arguments before clang-tidy's Clang frontend consumes the database.
-
-The original compilation database is never modified.
-
-### 6. Initialize CodeQL
+### 5. Initialize CodeQL
 
 When CodeQL is enabled, the workflow initializes CodeQL before the build.
 
@@ -573,12 +578,12 @@ This step is skipped when:
 codeql: false
 ```
 
-### 7. Build Project
+### 6. Build Project
 
 The `build-project` action builds the project using the matching CMake build preset:
 
 ```text
-cmake --build --preset windows-<config>
+cmake --build --preset x64-<config>
 cmake --build --preset linux-<config>
 ```
 
@@ -586,7 +591,7 @@ The build action does not independently reconstruct the build directory or compi
 
 `CMakePresets.json` remains the source of truth.
 
-### 8. Run clang-tidy
+### 7. Run clang-tidy
 
 The `run-clang-tidy` action performs clang-tidy analysis using the post-processed compilation database.
 
@@ -595,7 +600,8 @@ The analysis:
 - runs in parallel
 - uses available processor cores
 - treats warnings as errors
-- restricts analysis to the project's source tree
+- restricts analysis to the project's source tree (`src/`), including headers under it
+- uses the same invocation on Windows and Linux
 
 The parallel execution is implemented by:
 
@@ -603,7 +609,7 @@ The parallel execution is implemented by:
 .github/scripts/run-clang-tidy.py
 ```
 
-### 9. Perform CodeQL Analysis
+### 8. Perform CodeQL Analysis
 
 When CodeQL is enabled, the workflow performs CodeQL analysis after the build.
 
@@ -615,20 +621,20 @@ Results use a matrix-specific category:
 
 This keeps results from different matrix entries distinguishable.
 
-### 10. Upload Build Logs
+### 9. Upload Build Logs
 
 When the matrix job fails, build log files are uploaded as an artifact.
 
 The logs are retained for seven days.
 
-### 11. Upload Compilation Databases
+### 10. Upload Compilation Databases
 
 The original and post-processed compilation databases are uploaded as a separate artifact.
 
 The artifact identifies the matrix entry that produced it:
 
 ```text
-compile-commands-<os>-<config>
+compilation-databases-<os>-<config>
 ```
 
 The artifact is retained for seven days.
@@ -667,7 +673,7 @@ Each matrix job can produce two types of artifacts:
 | Artifact | Content | Condition | Retention |
 | --- | --- | --- | --- |
 | `build-logs-<os>-<config>` | Build log files | Job failure | 7 days |
-| `compile-commands-<os>-<config>` | Original and post-processed `compile_commands.json` | Compilation database generated | 7 days |
+| `compilation-databases-<os>-<config>` | Original and post-processed `compile_commands.json` | Compilation database generated | 7 days |
 
 The `<os>-<config>` suffix identifies the matrix entry that produced the artifact.
 
@@ -755,7 +761,7 @@ Ninja
 
 On Linux, the corresponding compiler, LLVM tools, and Ninja environment are prepared.
 
-On Windows, MSVC is initialized by the action itself rather than by a third-party action: `vswhere` locates the latest Visual Studio instance that has the MSVC x86/x64 toolset, `VsDevCmd.bat` is run for an x64 host and target, and only the environment variables it changed are exported to later steps. Toolset and Windows SDK versions are not pinned; they follow whatever the runner image provides.
+On Windows, MSVC is initialized by the action itself: `vswhere` locates the latest Visual Studio instance that has the MSVC x86/x64 toolset, `VsDevCmd.bat` is run for an x64 host and target, and only the environment variables it changed are exported to later steps. Toolset and Windows SDK versions are not pinned; they follow whatever the runner image provides.
 
 Python, Ruff, LLVM and Ninja versions are pinned inside the action (`python-version` and the `*_VERSION` / `LLVM_MAJOR` environment variables), so changing a tool version is a change to this action only. On Linux, LLVM is pinned by major version only.
 
@@ -811,11 +817,11 @@ The action does not install Ruff or clang-format; it expects `setup-environment`
 Configures the project using the CMake preset matching the current operating system and configuration:
 
 ```text
-cmake --preset windows-<config>
+cmake --preset x64-<config>
 cmake --preset linux-<config>
 ```
 
-The action normalizes the configuration name before selecting the preset.
+The action normalizes the configuration name before selecting the preset. It reads the resulting binary directory from CMake's own configure output rather than deriving it from the preset name.
 
 Compiler selection, generator selection, build type, architecture, binary directory, and project-specific cache variables remain in:
 
@@ -823,45 +829,25 @@ Compiler selection, generator selection, build type, architecture, binary direct
 CMakePresets.json
 ```
 
-The action exposes the preset's binary directory as:
+After configuration, the action produces the compilation database used for static analysis:
 
-```text
-build-dir
-```
-
----
-
-## `post-process-compile-commands`
-
-```text
-.github/actions/post-process-compile-commands/action.yml
-```
-
-Takes the `build-dir` output from `configure-cmake` and produces the compilation database used for static analysis.
-
-The action:
-
-- validates that `compile_commands.json` exists
-- validates that it contains valid JSON
+- validates that `compile_commands.json` exists and contains a valid JSON array
 - reports its entry count
-- detects an optional repository-specific post-processing script
-- invokes the script when present
-- otherwise copies the database unchanged
+- detects an optional repository-specific post-processing script (`.github-ext/post_process_compile_commands.py`)
+- invokes the script when present, otherwise copies the database unchanged
 - validates the resulting database
 - verifies that the entry count is unchanged
-- exposes the resulting directory as `db-dir`
+
+The action exposes:
+
+```text
+build-dir   the binary directory reported by CMake, relative to the workspace
+db-dir      the directory containing the post-processed compile_commands.json
+```
 
 The action contains no compiler- or language-specific logic.
 
-Repository-specific compilation-database translation belongs outside `.github/`.
-
-For example:
-
-```text
-scripts/post_process_compile_commands.py
-```
-
-may be provided by a CUDA repository when NVCC-generated commands require adaptation for clang-tidy.
+Repository-specific compilation-database translation belongs outside `.github/`, in `.github-ext/post_process_compile_commands.py`. A CUDA repository may provide it when NVCC-generated commands require adaptation for clang-tidy.
 
 Most repositories do not need this script.
 
@@ -876,13 +862,13 @@ Most repositories do not need this script.
 Builds the project through the matching CMake build preset:
 
 ```text
-cmake --build --preset windows-<config>
+cmake --build --preset x64-<config>
 cmake --build --preset linux-<config>
 ```
 
 Like `configure-cmake`, the action normalizes the configuration name before selecting the preset.
 
-The action does not independently reconstruct compiler or build-directory settings.
+The action does not independently reconstruct compiler or build-directory settings, and it does not set up the compiler environment itself; that comes from `setup-environment`.
 
 ---
 
@@ -892,11 +878,17 @@ The action does not independently reconstruct compiler or build-directory settin
 .github/actions/run-clang-tidy/action.yml
 ```
 
-Runs clang-tidy against the compilation database produced by:
+Runs clang-tidy against the post-processed compilation database exposed by `configure-cmake` as `db-dir`.
+
+The action takes one input:
 
 ```text
-post-process-compile-commands
+db-dir   directory containing the post-processed compile_commands.json
 ```
+
+The action fails immediately if `db-dir` is empty, because composite actions do not enforce required inputs.
+
+It runs as a single step on both Windows and Linux. Files and headers under `src/` are analyzed, and all warnings are treated as errors.
 
 The action delegates parallel execution to:
 
@@ -919,8 +911,8 @@ Additional implementation details are documented in:
 It defines one preset for each supported operating-system/build-configuration combination, for example:
 
 ```text
-windows-debug
-windows-release
+x64-debug
+x64-release
 linux-debug
 linux-release
 ```
@@ -941,8 +933,8 @@ Both local development and CI use the same presets.
 For example:
 
 ```text
-cmake --preset windows-debug
-cmake --build --preset windows-debug
+cmake --preset x64-debug
+cmake --build --preset x64-debug
 ```
 
 and:
@@ -958,14 +950,15 @@ This prevents CI-specific compiler or build configuration from drifting away fro
 
 # Project-Specific Extensions
 
-A repository may provide either or both of:
+A repository may provide any of:
 
 ```text
 .github-ext/static-code-analysis.json
 .github-ext/setup_environment.py
+.github-ext/post_process_compile_commands.py
 ```
 
-Both files are optional and independent.
+All files are optional and independent.
 
 ## `static-code-analysis.json` Override
 
@@ -999,9 +992,19 @@ A project that requires none of them simply does not provide the extension.
 
 The extension must fail with a non-zero exit code when required project-specific setup cannot be completed.
 
-## Why Both Live in `.github-ext/`
+## `post_process_compile_commands.py` Extension
 
-Keeping both the configuration override and the environment-setup script in one directory, outside `.github/`, means all per-project variation is concentrated in a single, well-known location. As a direct consequence, the entire `.github/` directory can be replaced wholesale, for example to roll out an updated CI template across many repositories, without touching any repository-specific configuration or setup logic.
+This file is optional.
+
+It is executed by `configure-cmake` after CMake configuration, with two arguments: the path of the generated `compile_commands.json` and an output directory.
+
+The script must write `compile_commands.json` into the output directory and must keep the number of entries unchanged. The action fails if the output is missing, is not a JSON array, or has a different entry count. A non-zero exit code also fails the step.
+
+If the file does not exist, the compilation database is copied unchanged.
+
+## Why They Live in `.github-ext/`
+
+Keeping the configuration override, the environment-setup script, and the compilation-database post-processing script in one directory, outside `.github/`, means all per-project variation is concentrated in a single, well-known location. As a direct consequence, the entire `.github/` directory can be replaced wholesale, for example to roll out an updated CI template across many repositories, without touching any repository-specific configuration or setup logic.
 
 ---
 
@@ -1074,8 +1077,8 @@ No modification to the shared composite action is required.
 The individual build components can be run locally using the same CMake presets consumed by CI:
 
 ```text
-cmake --preset windows-debug
-cmake --build --preset windows-debug
+cmake --preset x64-debug
+cmake --build --preset x64-debug
 ```
 
 or:
@@ -1172,7 +1175,7 @@ The workflow should remain readable as a high-level recipe.
 
 The generic CI infrastructure should not accumulate project-specific dependency, tool installation, or analysis-parameter logic.
 
-Repository-specific requirements belong in the optional `.github-ext/` extension: `static-code-analysis.json` for configuration overrides and `setup_environment.py` for environment setup.
+Repository-specific requirements belong in the optional `.github-ext/` extension: `static-code-analysis.json` for configuration overrides, `setup_environment.py` for environment setup, and `post_process_compile_commands.py` for compilation-database translation.
 
 Because all such variation is concentrated there, the entire `.github/` directory can be replaced wholesale without affecting any individual repository's specific setup.
 
@@ -1197,7 +1200,7 @@ If an analysis tool requires a compilation database different from the one gener
 For example:
 
 ```text
-scripts/post_process_compile_commands.py
+.github-ext/post_process_compile_commands.py
 ```
 
 may adapt CUDA/NVCC compilation commands for clang-tidy.
@@ -1249,5 +1252,5 @@ to keep the documentation consistent with the implementation.
 
 ---
 
-**Last Updated:** 09/Oct/2026
+**Last Updated:** 10/Oct/2026
 **Maintainer:** AmitGDev
