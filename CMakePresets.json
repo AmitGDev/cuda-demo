@@ -13,8 +13,16 @@
       }
     },
     {
+      "name": "cuda-base",
+      "hidden": true,
+      "description": "CUDA-specific settings, isolated from 'base' so a non-CUDA repo can drop this preset and the inherits reference below with no other changes.",
+      "cacheVariables": {
+        "CMAKE_CUDA_ARCHITECTURES": "75"
+      }
+    },
+    {
       "name": "windows-debug",
-      "inherits": ["base"],
+      "inherits": ["base", "cuda-base"],
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -28,7 +36,7 @@
     },
     {
       "name": "windows-release",
-      "inherits": ["base"],
+      "inherits": ["base", "cuda-base"],
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -42,7 +50,7 @@
     },
     {
       "name": "linux-debug",
-      "inherits": ["base"],
+      "inherits": ["base", "cuda-base"],
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -51,12 +59,13 @@
       "binaryDir": "${sourceDir}/build/x64-debug",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "CMAKE_CXX_COMPILER": "clang++"
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CUDA_HOST_COMPILER": "g++-12"
       }
     },
     {
       "name": "linux-release",
-      "inherits": ["base"],
+      "inherits": ["base", "cuda-base"],
       "condition": {
         "type": "equals",
         "lhs": "${hostSystemName}",
@@ -65,7 +74,8 @@
       "binaryDir": "${sourceDir}/build/x64-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CXX_COMPILER": "clang++"
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_CUDA_HOST_COMPILER": "g++-12"
       }
     }
   ],
